@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  release:
+    types:
+      - published
   workflow_dispatch:
     inputs:
       release:
@@ -12,19 +15,21 @@ on:
         default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release && 'release' || 'build' }}
-  cancel-in-progress: ${{ !inputs.release }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'release' && 'publish' || inputs.release && 'release' || 'build' }}
+  cancel-in-progress: ${{ github.event_name != 'release' && !inputs.release }}
 
 jobs:
   calculate_version:
     name: Calculate version
-    if: ${{ !inputs.release }}
+    if: github.event_name != 'release' && !inputs.release
     runs-on: ubuntu-latest
     outputs:
       app_changed: ${{ steps.outputs.outputs.app_changed }}
       build_number: ${{ steps.outputs.outputs.build_number }}
       library_hash: ${{ steps.outputs.outputs.library_hash }}
       packages_changed: ${{ steps.outputs.outputs.packages_changed }}
+      stable: ${{ steps.outputs.outputs.stable }}
+      version: ${{ steps.outputs.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -34,39 +39,51 @@ jobs:
         id: outputs
         run: |-
           source .github/github.sh
+          RELEASES=$(retry gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft or .prerelease | not) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))')
+          STABLE=$(sort -V <<< "$RELEASES" | tail -1)
+          VERSION=$(jq -r .version api/package.json)
+          if [ -n "$STABLE" ]; then
+            IFS=. read -r MAJOR MINOR PATCH <<< "${STABLE#v}"
+            VERSION=$(printf '%s\n' "$VERSION" "$MAJOR.$MINOR.$((PATCH + 1))" | sort -V | tail -1)
+          fi
           PREVIOUS=0
           APP_CHANGED=true
           if retry git fetch --depth=1 origin tag nightly; then
             PREVIOUS=$(git tag -l --format='%(contents:subject)' nightly)
-            RELEASED=$(curl -fsSL --retry 3 "https://github.com/$GITHUB_REPOSITORY/releases/download/nightly/metadata.json" | jq -r .build || true)
-            if [ "$GITHUB_EVENT_NAME" = push ] && [ "$RELEASED" = "$PREVIOUS" ] && git diff --quiet 'nightly^{commit}' HEAD -- . \
+            RELEASED=$(curl -fsSL --retry 3 "https://github.com/$GITHUB_REPOSITORY/releases/download/nightly/metadata.json" | jq -r '"\(.version) \(.build)"' || true)
+            if [ "$GITHUB_EVENT_NAME" = push ] && [ "$RELEASED" = "$VERSION $PREVIOUS" ] && git diff --quiet 'nightly^{commit}' HEAD -- . \
               ':!.github' ':!cli' ':!cmd' ':!*.md' ':!LICENSE' ':!.gitignore' ':!.golangci.yml' ':!.prettierignore' ':!dev/strings.mjs' ':!*_test.go'; then
               APP_CHANGED=false
             fi
           fi
           PACKAGE_PATHS=(api cli cmd/swipt-server internal go.mod go.sum ':!internal/automation/runtime' ':!internal/cmd' ':!*_test.go')
           PACKAGES_CHANGED=true
+          NIGHTLY=$(npm view @swipt/api@nightly version 2> /dev/null || true)
           PUBLISHED=$(npm view @swipt/api@nightly gitHead 2> /dev/null || true)
-          if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$PUBLISHED" ] && git fetch --depth=1 origin "$PUBLISHED" 2> /dev/null \
+          if [ "$GITHUB_EVENT_NAME" = push ] && [[ "$NIGHTLY" == "$VERSION-nightly."* ]] && [ -n "$PUBLISHED" ] && git fetch --depth=1 origin "$PUBLISHED" 2> /dev/null \
             && git diff --quiet "$PUBLISHED" HEAD -- "${PACKAGE_PATHS[@]}" && git diff --quiet 'nightly^{commit}' HEAD -- "${PACKAGE_PATHS[@]}"; then
             PACKAGES_CHANGED=false
           fi
           echo "app_changed=$APP_CHANGED packages_changed=$PACKAGES_CHANGED"
           echo "app_changed=$APP_CHANGED" >> "$GITHUB_OUTPUT"
           echo "packages_changed=$PACKAGES_CHANGED" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "stable=$STABLE" >> "$GITHUB_OUTPUT"
           echo "build_number=$((PREVIOUS + 1))"
           echo "build_number=$((PREVIOUS + 1))" >> "$GITHUB_OUTPUT"
           echo "library_hash=${{ hashFiles('go.mod', 'go.sum', 'api/*.go', 'api/package.json', 'libswipt/**', 'internal/**', '!internal/automation/runtime/**', '!internal/cmd/**', 'internal/cmd/build_libswipt/**', '!**/*_test.go') }}" >> "$GITHUB_OUTPUT"
-      - name: Check API level
-        run: |-
-          source .github/github.sh
-          STABLE=$(retry gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | select(.draft or .prerelease | not)][0].tag_name // empty')
-          if [ -n "$STABLE" ]; then
-            retry git fetch --depth=1 origin tag "$STABLE"
-            node .github/check_api_level.mjs "$STABLE"
-          fi
         env:
           GH_TOKEN: ${{ github.token }}
+      - name: Check API level
+        if: steps.outputs.outputs.stable != ''
+        run: |-
+          source .github/github.sh
+          retry git fetch --depth=1 origin tag "$STABLE"
+          node .github/check_api_level.mjs "$STABLE"
+        env:
+          STABLE: ${{ steps.outputs.outputs.stable }}
   build_apple_library:
     name: Build Apple library
     if: needs.calculate_version.outputs.app_changed == 'true'
@@ -204,7 +221,7 @@ jobs:
       - name: Build
         run: make archive_ios_ipa altstore_icon
         env:
-          XCODEBUILD_FLAGS: -clonedSourcePackagesDirPath ${{ runner.temp }}/SourcePackages CURRENT_PROJECT_VERSION=${{ needs.calculate_version.outputs.build_number }} COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_CAS_PATH=${{ runner.temp }}/CompilationCache COMPILATION_CACHE_LIMIT_SIZE=2G
+          XCODEBUILD_FLAGS: -clonedSourcePackagesDirPath ${{ runner.temp }}/SourcePackages MARKETING_VERSION=${{ needs.calculate_version.outputs.version }} CURRENT_PROJECT_VERSION=${{ needs.calculate_version.outputs.build_number }} COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_CAS_PATH=${{ runner.temp }}/CompilationCache COMPILATION_CACHE_LIMIT_SIZE=2G
       - name: Package dSYMs
         run: ditto -c -k --keepParent build/Swipt-iOS.xcarchive/dSYMs build/Swipt-iOS.dSYMs.zip
       - name: Write metadata
@@ -225,7 +242,7 @@ jobs:
           if-no-files-found: error
   build_server:
     name: Build server (${{ matrix.cpu }})
-    if: needs.calculate_version.outputs.app_changed == 'true' || needs.calculate_version.outputs.packages_changed == 'true'
+    if: needs.calculate_version.outputs.packages_changed == 'true'
     runs-on: xcode-27
     needs:
       - calculate_version
@@ -306,8 +323,6 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Publish
         run: |-
-          npm install -g npm@latest
-          BASE=$(node -p "require('./api/package.json').version")
           CURRENT=$(npm view @swipt/api@nightly version 2> /dev/null || true)
           NUMBER=1
           if [[ "$CURRENT" == "$BASE-nightly."* ]]; then
@@ -322,34 +337,17 @@ jobs:
             fi
           fi
           VERSION="$BASE-nightly.$NUMBER"
-          for cpu in arm64 x64; do
-            mkdir -p "build/server-darwin-$cpu"
-            install -m 755 "build/swipt-server-darwin-$cpu" "build/server-darwin-$cpu/swipt-server"
-            jq -n --arg cpu "$cpu" --arg version "$VERSION" '{name: "@swipt/server-darwin-\($cpu)", version: $version, license: "GPL-3.0-or-later",
-              repository: {type: "git", url: "https://github.com/swipt-automation/swipt.git", directory: "cmd/swipt-server"},
-              os: ["darwin"], cpu: [$cpu], bin: {"swipt-server": "swipt-server"}, files: ["swipt-server"], publishConfig: {access: "public"}}' \
-              > "build/server-darwin-$cpu/package.json"
-          done
-          PACKAGES="api build/server-darwin-arm64 build/server-darwin-x64 cli"
-          for package in api cli; do
-            npm version "$VERSION" --no-git-tag-version --prefix "$package"
-          done
-          npm pkg set "peerDependencies.@swipt/api=$VERSION" "optionalDependencies.@swipt/server-darwin-arm64=$VERSION" "optionalDependencies.@swipt/server-darwin-x64=$VERSION" --prefix cli
-          for package in $PACKAGES; do
-            cp LICENSE "$package/"
-            PACKAGE=$(node -p "require('./$package/package.json').name")
-            if npm view "$PACKAGE@$VERSION" version > /dev/null 2>&1; then
-              echo "$PACKAGE@$VERSION is already published"
-            else
-              npm publish "./$package" --tag nightly
-            fi
-          done
-          for package in $PACKAGES; do
-            PACKAGE=$(node -p "require('./$package/package.json').name")
-            case "$(npm view "$PACKAGE@latest" version 2> /dev/null)" in
-              *-*) npm dist-tag add "$PACKAGE@$VERSION" latest ;;
-            esac
-          done
+          .github/publish_packages.sh "$VERSION" nightly
+          if [ -z "$STABLE" ]; then
+            for package in api server-darwin-arm64 server-darwin-x64 cli; do
+              case "$(npm view "@swipt/$package@latest" version 2> /dev/null)" in
+                *-*) npm dist-tag add "@swipt/$package@$VERSION" latest ;;
+              esac
+            done
+          fi
+        env:
+          BASE: ${{ needs.calculate_version.outputs.version }}
+          STABLE: ${{ needs.calculate_version.outputs.stable }}
   publish_nightly:
     name: Publish nightly
     if: github.ref == 'refs/heads/main' && !cancelled() && !failure() && needs.calculate_version.outputs.app_changed == 'true'
@@ -399,7 +397,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
   move_nightly:
     name: Move nightly
-    if: github.ref == 'refs/heads/main' && needs.calculate_version.outputs.app_changed != 'true'
+    if: github.ref == 'refs/heads/main' && !cancelled() && !failure() && needs.calculate_version.outputs.app_changed == 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -446,11 +444,9 @@ jobs:
   release:
     name: Release
     if: inputs.release && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: xcode-27
     permissions:
-      actions: read
       contents: write
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -461,60 +457,85 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
       - name: Release
         run: |-
           source .github/github.sh
+          if ! git cat-file -e 'nightly^{commit}:.github/publish_packages.sh'; then
+            echo "nightly does not include the stable publish workflow yet, run it again after nightly moves" >&2
+            exit 1
+          fi
           retry gh release download nightly -D build --clobber -p Swipt.ipa -p Swipt-iOS.dSYMs.zip -p metadata.json -p icon.png
           if [ "$(jq .build build/metadata.json)" != "$(git tag -l --format='%(contents:subject)' nightly)" ]; then
             echo "nightly was updated during the release, run it again" >&2
             exit 1
           fi
-          COMMIT=$(git rev-parse 'nightly^{commit}')
-          RUN=$(retry gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=swipt-server-darwin-arm64&per_page=100" \
-            --jq "[.artifacts[] | select(.expired | not) | select(.workflow_run.head_sha == \"$COMMIT\")][0].workflow_run.id // empty")
-          if [ -z "$RUN" ]; then
-            echo "no build run found for nightly" >&2
-            exit 1
-          fi
-          for cpu in arm64 x64; do
-            retry gh run download "$RUN" -D build -n "swipt-server-darwin-$cpu"
-          done
           TAG=v$(jq -r .version build/metadata.json)
           if retry gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --silent 2> /dev/null || [ -n "$(retry drafts "$TAG")" ]; then
             echo "$TAG already exists" >&2
             exit 1
           fi
-          if PREVIOUS=$(retry gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name); then
-            NOTES=$(git log --format='* %s' "$PREVIOUS..nightly")
-          else
-            NOTES=$(git log --format='* %s' nightly)
-          fi
+          unzip -q build/Swipt.ipa -d build/stable
+          plutil -replace SwiptChannel -string stable build/stable/Payload/Swipt.app/Info.plist
+          rm build/Swipt.ipa
+          (cd build/stable && zip -qry ../Swipt.ipa Payload)
           go run ./internal/cmd/build_altstore_source -tag "$TAG"
-          retry create_draft "$TAG" --target "$(git rev-parse 'nightly^{commit}')" --notes "$NOTES" \
+          retry create_draft "$TAG" --target "$(git rev-parse 'nightly^{commit}')" --notes "" \
             build/Swipt.ipa build/Swipt-iOS.dSYMs.zip build/metadata.json build/icon.png build/altstore/altstore.json
-          git archive 'nightly^{commit}' api cli | tar -x -C build
-          for cpu in arm64 x64; do
-            mkdir -p "build/server-darwin-$cpu"
-            install -m 755 "build/swipt-server-darwin-$cpu" "build/server-darwin-$cpu/swipt-server"
-            jq -n --arg cpu "$cpu" --arg version "$(jq -r .version build/cli/package.json)" '{name: "@swipt/server-darwin-\($cpu)", version: $version, license: "GPL-3.0-or-later",
-              repository: {type: "git", url: "https://github.com/swipt-automation/swipt.git", directory: "cmd/swipt-server"},
-              os: ["darwin"], cpu: [$cpu], bin: {"swipt-server": "swipt-server"}, files: ["swipt-server"], publishConfig: {access: "public"}}' \
-              > "build/server-darwin-$cpu/package.json"
-          done
-          npm install -g npm@latest
-          for package in api server-darwin-arm64 server-darwin-x64 cli; do
-            cp LICENSE "build/$package/"
-            PACKAGE=$(node -p "const p = require('./build/$package/package.json'); p.name + '@' + p.version")
-            if npm view "$PACKAGE" version > /dev/null 2>&1; then
-              echo "$PACKAGE is already published"
-            else
-              npm publish "./build/$package"
-            fi
-          done
         env:
           GH_TOKEN: ${{ github.token }}
+  build_release_server:
+    name: Build release server
+    if: github.event_name == 'release' && !github.event.release.prerelease && startsWith(github.event.release.tag_name, 'v')
+    runs-on: xcode-27
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 1
+      - name: Select Xcode
+        run: .github/select_xcode.sh
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build
+        run: |-
+          GOARCH=arm64 go build -trimpath -ldflags "-s -w -buildid=" -o build/swipt-server-darwin-arm64 ./cmd/swipt-server
+          GOARCH=amd64 go build -trimpath -ldflags "-s -w -buildid=" -o build/swipt-server-darwin-x64 ./cmd/swipt-server
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: swipt-server-darwin
+          path: build/swipt-server-darwin-*
+          if-no-files-found: error
+  publish_release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    needs:
+      - build_release_server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 1
+      - name: Download servers
+        uses: actions/download-artifact@v4
+        with:
+          name: swipt-server-darwin
+          path: build
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Publish
+        run: .github/publish_packages.sh "${TAG#v}" latest
+        env:
+          TAG: ${{ github.event.release.tag_name }}
