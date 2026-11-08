@@ -1,6 +1,7 @@
 import Foundation
 import LibSwipt
 import Network
+import dnssd
 
 // The _remotepairing._tcp authTag authenticates the service identifier with the pairing record’s altIRK
 // (idevice d32c818, idevice/src/remote_pairing/peer_device.rs:33-45, idevice/src/remote_pairing/peer_device.rs:129-140).
@@ -8,14 +9,20 @@ final class RemotePairingBrowser {
     static let serviceType = "_remotepairing._tcp"
 
     private(set) var port: Int?
+    private(set) var status = "Not browsing"
+    private(set) var localNetworkDenied = false
     var onPortChange: ((Int) -> Void)?
+
+    var diagnostics: String {
+        "Bonjour: \(status)\nLocal Network policy denial observed: \(localNetworkDenied)\nServices: \(services.count); resolved: \(services.values.filter { $0.port != nil }.count)\nPort source: \(port == nil ? "fallback (no current matching service)" : "current matching Bonjour service")\nSelected remote-pairing port: \(port ?? 49152)\n\(resolutionStatus)"
+    }
 
     private var browser: NWBrowser?
     private var resolvers: [String: ServiceResolver] = [:]
     private var services: [String: Service] = [:]
     private var activeClients = 0
     private var restart: Task<Void, Never>?
-    private var isReady = false
+    private var resolutionStatus = "No resolver error observed"
 
     private struct Service {
         var txt = NWTXTRecord()
@@ -37,8 +44,18 @@ final class RemotePairingBrowser {
         cancelBrowsing()
     }
 
+    func retryDiscovery() {
+        guard activeClients > 0 else { return }
+        restart?.cancel()
+        restart = nil
+        cancelBrowsing()
+        browse()
+    }
+
     private func browse() {
-        isReady = false
+        status = "Starting"
+        localNetworkDenied = false
+        resolutionStatus = "No resolver error observed"
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: "local."), using: .tcp)
         browser.stateUpdateHandler = { [weak self, weak browser] state in
             let source = browser
@@ -73,17 +90,34 @@ final class RemotePairingBrowser {
         resolvers.values.forEach { $0.cancel() }
         resolvers.removeAll()
         services.removeAll()
+        status = "Stopped"
+        setPort(nil)
     }
 
     private func handle(_ state: NWBrowser.State) {
         switch state {
         case .ready:
-            isReady = true
-        case .failed where isReady:
+            status = "Ready (does not establish TCP reachability)"
+            localNetworkDenied = false
+        case .waiting(let error):
+            status = "Waiting: \(error)"
+            localNetworkDenied = Self.isPolicyDenied(error)
+            setPort(nil)
+        case .failed(let error):
+            let failure = "Failed: \(error)"
+            localNetworkDenied = Self.isPolicyDenied(error)
             retry()
+            status = failure
         default:
             break
         }
+    }
+
+    private static func isPolicyDenied(_ error: NWError) -> Bool {
+        if case .dns(let code) = error {
+            return code == kDNSServiceErr_PolicyDenied
+        }
+        return false
     }
 
     private func retry() {
@@ -111,6 +145,11 @@ final class RemotePairingBrowser {
             } addresses: { [weak self] addresses in
                 self?.services[name]?.addresses = addresses
                 self?.refresh()
+            } failure: { [weak self] code in
+                self?.resolutionStatus = "Service resolution error: \(code)"
+                self?.localNetworkDenied = code == kDNSServiceErr_PolicyDenied
+                self?.services[name]?.port = nil
+                self?.refresh()
             }
             resolvers[name] = resolver
             resolver.start()
@@ -122,13 +161,17 @@ final class RemotePairingBrowser {
         let localAddresses = Self.localAddresses()
         let found = services
             .filter { _, service in
-                service.port != nil
+                service.port.map { (1...65535).contains($0) } == true
                     && (Self.isPairedDevice(service.txt) || service.addresses.contains { localAddresses.contains(Self.comparable($0)) })
             }
             .min { $0.key < $1.key }?.value.port
-        guard let found, found != port else { return }
+        setPort(found)
+    }
+
+    private func setPort(_ found: Int?) {
+        guard found != port else { return }
         port = found
-        onPortChange?(found)
+        onPortChange?(found ?? 0)
     }
 
     private static func isPairedDevice(_ txt: NWTXTRecord) -> Bool {

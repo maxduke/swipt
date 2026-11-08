@@ -86,6 +86,7 @@ struct LoopbackSetupView: View {
     @State private var hasSingBox = false
     @State private var usesCellular = false
     @State private var pathMonitor: NWPathMonitor?
+    @State private var showsDiagnostics = false
 
     private let device = Platform.shared.device
 
@@ -97,6 +98,11 @@ struct LoopbackSetupView: View {
                 ? Text("Swipt only stops working on cellular data, due to Apple’s restrictions on developer services.")
                 : Text("Swipt needs a loopback VPN to connect to developer services. LocalDevVPN or sing-box is recommended.")
         ) {
+            WithPerceptionTracking {
+                Text(device.probeMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             if !usesCellular {
                 VStack(spacing: 24) {
                     Divider()
@@ -121,6 +127,14 @@ struct LoopbackSetupView: View {
                 .padding(.top, 8)
             }
         } actions: {
+            HStack {
+                Button("Retry") { device.retryProbing() }
+                Spacer()
+                Button("Diagnostics") { showsDiagnostics = true }
+            }
+        }
+        .sheet(isPresented: $showsDiagnostics) {
+            LoopbackDiagnosticsView()
         }
         .onChangeCompat(of: scenePhase == .active, initial: true) { active in
             guard active else { return }
@@ -156,5 +170,45 @@ struct LoopbackSetupView: View {
             popover.permittedArrowDirections = []
         }
         top.present(controller, animated: true)
+    }
+}
+
+struct LoopbackDiagnosticsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var report = ""
+    @State private var copied = false
+
+    private let device = Platform.shared.device
+
+    var body: some View {
+        NavigationStackCompat {
+            ScrollView {
+                Text(verbatim: report)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+            .navigationTitle("VPN Diagnostics")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(copied ? "Copied" : "Copy Diagnostics") {
+                        UIPasteboard.general.string = report
+                        copied = true
+                    }
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    Button("Refresh Diagnostics") {
+                        report = device.diagnostics
+                        copied = false
+                    }
+                }
+            }
+        }
+        .onAppear { report = device.diagnostics }
     }
 }

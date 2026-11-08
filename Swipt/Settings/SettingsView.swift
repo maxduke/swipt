@@ -5,6 +5,7 @@ import AppKit
 
 struct SettingsView: View {
     private static let sourceCode = URL(string: "https://github.com/swipt-automation/swipt")!
+    @State private var showsVPNDiagnostics = false
 
     var body: some View {
         Form {
@@ -26,6 +27,11 @@ struct SettingsView: View {
                     } label: {
                         Label("Automatic Unlock", systemImage: "lock.open")
                     }
+                    Button {
+                        showsVPNDiagnostics = true
+                    } label: {
+                        Label("VPN Diagnostics", systemImage: "network")
+                    }
                 }
                 #endif
             }
@@ -41,6 +47,11 @@ struct SettingsView: View {
         .unboundedFormWidth()
         #endif
         .navigationTitle("Settings")
+        #if os(iOS)
+        .sheet(isPresented: $showsVPNDiagnostics) {
+            LoopbackDiagnosticsView()
+        }
+        #endif
     }
 }
 

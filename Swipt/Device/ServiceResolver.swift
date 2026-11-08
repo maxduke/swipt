@@ -17,17 +17,19 @@ final class ServiceResolver {
     private let type: String
     private let resolved: (String, Int) -> Void
     private let addressesChanged: (Set<Data>) -> Void
+    private let failure: ((DNSServiceErrorType) -> Void)?
     private var cancelled = false
     private var reference: DNSServiceRef?
     private var addressReference: DNSServiceRef?
     private var addressHost: String?
     private var addresses: Set<Data> = []
 
-    init(name: String, type: String, resolved: @escaping (String, Int) -> Void, addresses: @escaping (Set<Data>) -> Void) {
+    init(name: String, type: String, resolved: @escaping (String, Int) -> Void, addresses: @escaping (Set<Data>) -> Void, failure: ((DNSServiceErrorType) -> Void)? = nil) {
         self.name = name
         self.type = type
         self.resolved = resolved
         addressesChanged = addresses
+        self.failure = failure
     }
 
     func start() {
@@ -136,6 +138,7 @@ final class ServiceResolver {
         let error = Failure(code: code)
         Self.logger.error("Service resolution failed: \(error, privacy: .public)")
         cancel()
+        failure?(code)
     }
 
     func cancel() {

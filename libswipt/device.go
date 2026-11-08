@@ -2,6 +2,7 @@ package libSwipt
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"sync/atomic"
 
@@ -52,47 +53,6 @@ type DeviceHandler interface {
 	BacklightState() int32
 }
 
-const defaultRemotePairingPort = 49152
-
-type LoopbackAddress struct {
-	LocalNetwork bool
-}
-
-func newLoopbackAddress(peer vpnpeer.Peer) *LoopbackAddress {
-	return &LoopbackAddress{LocalNetwork: peer.LocalNetwork}
-}
-
-type LoopbackProbe struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	port   uint16
-}
-
-func NewLoopbackProbe(remotePairingPort int32) *LoopbackProbe {
-	port := uint16(remotePairingPort)
-	if port == 0 {
-		port = defaultRemotePairingPort
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	return &LoopbackProbe{ctx: ctx, cancel: cancel, port: port}
-}
-
-func (p *LoopbackProbe) Run() (*LoopbackAddress, error) {
-	defer p.cancel()
-	peer, err := vpnpeer.Find(p.ctx, p.port, true)
-	if p.ctx.Err() != nil {
-		return nil, p.ctx.Err()
-	}
-	if err != nil {
-		return nil, err
-	}
-	return newLoopbackAddress(peer), nil
-}
-
-func (p *LoopbackProbe) Cancel() {
-	p.cancel()
-}
-
 type Device struct {
 	logFactory  *log.Factory
 	connection  *device.Connection
@@ -101,6 +61,13 @@ type Device struct {
 	pairing     atomic.Pointer[pairingFile]
 	loopback    atomic.Pointer[LoopbackAddress]
 	unavailable atomic.Bool
+	probeReport atomic.Pointer[deviceProbeReport]
+}
+
+type deviceProbeReport struct {
+	probe     vpnpeer.Report
+	stage     string
+	errorCode int32
 }
 
 func newDevice(options *DeviceOptions, handler DeviceHandler, logFactory *log.Factory) *Device {
@@ -116,8 +83,10 @@ func newDevice(options *DeviceOptions, handler DeviceHandler, logFactory *log.Fa
 			}
 			port := uint16(d.pairingPort.Load())
 			var udid string
+			service := "remote pairing"
 			if file.lockdown != nil {
 				port = lockdown.Port
+				service = "lockdown"
 				udid = file.lockdown.UDID
 			} else {
 				udid = file.remote.DeviceUDID
@@ -125,7 +94,13 @@ func newDevice(options *DeviceOptions, handler DeviceHandler, logFactory *log.Fa
 			allowLocal := coredevice.IsGuest(udid)
 			var localError error
 			for {
-				peer, err := vpnpeer.Find(ctx, port, allowLocal)
+				peer, report, err := vpnpeer.FindWithDiagnostics(ctx, port, allowLocal)
+				report.Service = service
+				stage := "TCP probe failed"
+				if err == nil {
+					stage = "TCP reached; pairing/tunnel setup in progress"
+				}
+				d.probeReport.Store(&deviceProbeReport{probe: report, stage: stage, errorCode: int32(device.ProblemOf(err))})
 				var connected *coredevice.Device
 				if err == nil {
 					connectLogger.Info("device address: ", peer.Address, ", local network: ", peer.LocalNetwork)
@@ -137,9 +112,16 @@ func newDevice(options *DeviceOptions, handler DeviceHandler, logFactory *log.Fa
 						})
 					}
 					if err == nil {
+						d.probeReport.Store(&deviceProbeReport{probe: report, stage: "paired tunnel connected"})
 						d.loopback.Store(newLoopbackAddress(peer))
 						return connected, nil
 					}
+					// TCP already succeeded. A failure reaching a later pairing or
+					// tunnel port must not be presented as a missing VPN.
+					if device.ProblemOf(err) == device.ProblemNoTunnel {
+						err = &device.Error{Problem: device.ProblemOther, Err: err}
+					}
+					d.probeReport.Store(&deviceProbeReport{probe: report, stage: "TCP reached; pairing/tunnel setup failed", errorCode: int32(device.ProblemOf(err))})
 				}
 				if !allowLocal || ctx.Err() != nil {
 					return nil, E.Errors(localError, err)
@@ -200,6 +182,24 @@ func (d *Device) LoopbackAddress() *LoopbackAddress {
 	return d.loopback.Load()
 }
 
+func (d *Device) ProbeDiagnostics() string {
+	report := d.probeReport.Load()
+	if report == nil {
+		return "No device-connection TCP probe."
+	}
+	return fmt.Sprintf("Stage: %s; error category: %d\n%s", report.stage, report.errorCode, probeDiagnostics(&report.probe))
+}
+
+// Use the same service as the connection, including imported lockdown records.
+func (d *Device) NewLoopbackProbe(remotePairingPort int32) *LoopbackProbe {
+	probe := NewLoopbackProbe(remotePairingPort)
+	if file := d.pairing.Load(); file != nil && file.lockdown != nil {
+		probe.port = lockdown.Port
+		probe.service = "lockdown"
+	}
+	return probe
+}
+
 func (d *Device) SetRemotePairingPort(port int32) {
 	if d.setPairingPort(port) {
 		d.connection.Retry()
@@ -208,10 +208,8 @@ func (d *Device) SetRemotePairingPort(port int32) {
 }
 
 func (d *Device) setPairingPort(port int32) bool {
-	if port == 0 {
-		port = defaultRemotePairingPort
-	}
-	return d.pairingPort.Swap(uint32(port)) != uint32(port)
+	selected := uint32(remotePairingPortOrDefault(port))
+	return d.pairingPort.Swap(selected) != selected
 }
 
 type deviceObserver struct {
