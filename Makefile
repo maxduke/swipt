@@ -20,12 +20,8 @@ encodings:
 	cd $(RUNTIME) && bun encodings.mjs
 
 proto:
-	go run ./internal/cmd/protogen
-	golangci-lint fmt
-
-proto_install:
-	go install -v google.golang.org/protobuf/cmd/protoc-gen-go@latest
-	go install -v google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+	rm -rf cli/proto
+	node_modules/.bin/buf generate
 
 $(RUNTIME_BUNDLE): $(RUNTIME_BUNDLE_INPUTS)
 	mkdir -p build/runtime
