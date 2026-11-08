@@ -10,16 +10,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/swipt-automation/swipt/internal/coredevice/nserror"
 	"github.com/swipt-automation/swipt/internal/coredevice/xpc"
-
-	"howett.net/plist"
 )
 
 // pymobiledevice3 sends client-version 3, image type 10, persistence 2 and
@@ -69,86 +64,26 @@ func (c *Client) MountCryptex(ctx context.Context, dir string) error {
 	return install(ctx)
 }
 
-func (c *Client) CryptexOutdated(ctx context.Context, dir string) (installed, available string, outdated bool, err error) {
-	entry, err := c.ddiCryptex(ctx)
-	if err != nil || entry == nil {
-		return "", "", false, err
-	}
-	installed, _ = entry["remote-cryptex-version"].(string)
-	manifest, err := loadManifest(ctx, dir)
-	if err != nil {
-		return "", "", false, err
-	}
-	identity, err := manifest.cryptexIdentity()
-	if err != nil {
-		return "", "", false, err
-	}
-	data, err := identity.readFile(ctx, dir, "Cryptex1,CryptexInfoPlist")
-	if err != nil {
-		return "", "", false, err
-	}
-	var info struct {
-		Version string `plist:"CFBundleVersion"`
-	}
-	if _, err = plist.Unmarshal(data, &info); err != nil {
-		return "", "", false, E.Cause(err, "imagemounter: decode the cryptex info")
-	}
-	installedVersion, err := parseCryptexVersion(installed)
-	if err != nil {
-		return "", "", false, err
-	}
-	availableVersion, err := parseCryptexVersion(info.Version)
-	if err != nil {
-		return "", "", false, err
-	}
-	return installed, info.Version, cryptexVersionOlder(installedVersion, availableVersion), nil
-}
-
-func (c *Client) ReplaceCryptex(ctx context.Context, dir string) error {
+func (c *Client) ReplaceCryptex(ctx context.Context, dir string, personalized bool) error {
 	install, err := c.prepareCryptex(ctx, dir)
 	if err != nil {
 		return err
 	}
-	// pymobiledevice3 names the cryptex to uninstall by
-	// remote-cryptex-identifier (pymobiledevice3 1146717,
-	// pymobiledevice3/services/cryptexd.py:675-690). cryptexd answered on the
-	// same tunnel after uninstall (iPhone18,2 virtual, iOS 27.0.1 24A446).
-	_, err = c.invokeCryptexd(ctx, "uninstall", map[string]any{"remote-cryptex-identifier": ddiCryptexIdentifier}, nil)
+	if personalized {
+		// cryptexd installed on the same tunnel after UnmountImage
+		// (iPhone18,2, iOS 27.3 24C5037i).
+		err = c.Unmount(ctx)
+	} else {
+		// pymobiledevice3 names the cryptex to uninstall by
+		// remote-cryptex-identifier (pymobiledevice3 1146717,
+		// pymobiledevice3/services/cryptexd.py:675-690). cryptexd answered on the
+		// same tunnel after uninstall (iPhone18,2 virtual, iOS 27.0.1 24A446).
+		_, err = c.invokeCryptexd(ctx, "uninstall", map[string]any{"remote-cryptex-identifier": ddiCryptexIdentifier}, nil)
+	}
 	if err != nil {
 		return err
 	}
 	return install(ctx)
-}
-
-// The version spells the DDI build: 27A5228h is 27.1.5228.8, 27A9266e is
-// 27.1.9266.5 and 27B52 is 27.2.52.0 (Image.dmg.cryptex_info, those DDI builds).
-func parseCryptexVersion(text string) ([4]uint64, error) {
-	var version [4]uint64
-	parts := strings.Split(text, ".")
-	if len(parts) != len(version) {
-		return version, E.New("imagemounter: unexpected cryptex version ", strconv.Quote(text))
-	}
-	for index, part := range parts {
-		var err error
-		version[index], err = strconv.ParseUint(part, 10, 64)
-		if err != nil {
-			return version, E.Cause(err, "imagemounter: unexpected cryptex version ", strconv.Quote(text))
-		}
-	}
-	return version, nil
-}
-
-// A build with a trailing letter precedes the plain builds of its train
-// whatever its number: DDI 27B5028f has CoreDevice 651.19 and DDI 27B48 has
-// 651.31 (CoreDeviceUtilities current version, those DDI builds).
-func cryptexVersionOlder(version, than [4]uint64) bool {
-	if order := slices.Compare(version[:2], than[:2]); order != 0 {
-		return order < 0
-	}
-	if (version[3] != 0) != (than[3] != 0) {
-		return version[3] != 0
-	}
-	return slices.Compare(version[2:], than[2:]) < 0
 }
 
 func (c *Client) prepareCryptex(ctx context.Context, dir string) (func(ctx context.Context) error, error) {

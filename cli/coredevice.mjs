@@ -441,18 +441,32 @@ export async function pushToContainer(device, id, source, destination) {
     });
     return;
   }
-  await devicectl([
-    "device",
-    "copy",
-    "to",
-    "--device",
-    device.udid,
-    "--source",
-    source,
-    "--destination",
-    destination,
-    ...containerOptions(id),
-  ]);
+  // dtfileserviced of the CoreDevice 477 Developer Disk Image creates the
+  // missing parents of a copied file as root, but gives every directory of a
+  // copied tree to mobile, so the file is copied inside a tree rooted at a
+  // top-level directory of the container.
+  const [root, ...rest] = destination.split("/");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "swipt-container-"));
+  try {
+    const tree = path.join(work, root);
+    const target = path.join(tree, ...rest);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+    await devicectl([
+      "device",
+      "copy",
+      "to",
+      "--device",
+      device.udid,
+      "--source",
+      tree,
+      "--destination",
+      root,
+      ...containerOptions(id),
+    ]);
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
 }
 
 export const provisioningProfiles = async (udid) =>

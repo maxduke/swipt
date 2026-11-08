@@ -14,6 +14,10 @@
   "dependencies": {
     "swipt-runtime": "workspace:*"
   },
+  "devDependencies": {
+    "@bufbuild/buf": "^1.75.0",
+    "@bufbuild/protoc-gen-es": "^2.16.0"
+  },
   "patchedDependencies": {
     "@expo/ui@58.0.26": "internal/automation/runtime/patches/@expo%2Fui@58.0.26.patch",
     "expo-modules-autolinking@58.0.16": "internal/automation/runtime/patches/expo-modules-autolinking@58.0.16.patch",

@@ -38,6 +38,10 @@ const (
 	// pymobiledevice3/services/mobile_image_mounter.py:374,401-403,432).
 	personalizedImageType = "Personalized"
 	personalizedDDIType   = "DeveloperDiskImage"
+
+	// pymobiledevice3 unmounts the personalized image at this path
+	// (pymobiledevice3 9537c0a, pymobiledevice3/services/mobile_image_mounter.py:448-450).
+	developerMountPath = "/System/Developer"
 )
 
 var (
@@ -59,6 +63,7 @@ type Status struct {
 	Personalized  bool
 	Cryptex       bool
 	CryptexError  error
+	Build         string
 }
 
 func (s Status) Mounted() bool {
@@ -66,7 +71,10 @@ func (s Status) Mounted() bool {
 }
 
 func (c *Client) Status(ctx context.Context) (Status, error) {
-	var status Status
+	var (
+		status Status
+		image  map[string]any
+	)
 	err := c.withMounter(ctx, func(conn *mounterConn) error {
 		var err error
 		status.DeveloperMode, err = conn.developerModeStatus()
@@ -74,11 +82,17 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 			return err
 		}
 		status.Personalized, err = conn.imageMounted(personalizedImageType)
+		if err != nil {
+			return err
+		}
+		image, err = conn.developerImage()
 		return err
 	})
 	if err != nil {
 		return Status{}, err
 	}
+	info, _ := image["PersonalizedImageVersionInfo"].(map[string]any)
+	status.Build, _ = info["ProductBuildVersion"].(string)
 	if c.device.HasService(cryptexService) {
 		entry, err := c.ddiCryptex(ctx)
 		status.Cryptex = entry != nil
@@ -90,6 +104,7 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 			status.CryptexError = err
 		}
 	}
+	status.Personalized = status.Personalized || image != nil && !status.Cryptex
 	return status, nil
 }
 

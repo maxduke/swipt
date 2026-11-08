@@ -42,7 +42,8 @@ var fixedNames = map[string]string{
 const cryptexVariantSuffix = "Developer Disk Image Cryptex"
 
 type manifest struct {
-	BuildIdentities []buildIdentity `plist:"BuildIdentities"`
+	ProductBuildVersion string          `plist:"ProductBuildVersion"`
+	BuildIdentities     []buildIdentity `plist:"BuildIdentities"`
 }
 
 type buildIdentity map[string]any
@@ -61,6 +62,56 @@ func parseManifest(data []byte) (*manifest, error) {
 		return nil, E.Cause(err, "imagemounter: decode ", manifestName)
 	}
 	return &m, nil
+}
+
+func Outdated(ctx context.Context, mounted, dir string) (available string, outdated bool, err error) {
+	manifest, err := loadManifest(ctx, dir)
+	if err != nil {
+		return "", false, err
+	}
+	mountedVersion, err := parseBuild(mounted)
+	if err != nil {
+		return "", false, err
+	}
+	availableVersion, err := parseBuild(manifest.ProductBuildVersion)
+	if err != nil {
+		return "", false, err
+	}
+	return manifest.ProductBuildVersion, buildOlder(mountedVersion, availableVersion), nil
+}
+
+// DDI builds 27A5228h, 27A9266e and 27B52 have cryptex versions 27.1.5228.8,
+// 27.1.9266.5 and 27.2.52.0 (Image.dmg.cryptex_info, those DDI builds).
+func parseBuild(build string) ([4]uint64, error) {
+	var version [4]uint64
+	train := strings.IndexFunc(build, func(r rune) bool { return r < '0' || r > '9' })
+	if train > 0 && build[train] >= 'A' && build[train] <= 'Z' {
+		number := build[train+1:]
+		if last := len(number) - 1; last > 0 && number[last] >= 'a' && number[last] <= 'z' {
+			version[3] = uint64(number[last]-'a') + 1
+			number = number[:last]
+		}
+		major, majorErr := strconv.ParseUint(build[:train], 10, 64)
+		minor, minorErr := strconv.ParseUint(number, 10, 64)
+		if majorErr == nil && minorErr == nil {
+			version[0], version[1], version[2] = major, uint64(build[train]-'A')+1, minor
+			return version, nil
+		}
+	}
+	return version, E.New("imagemounter: unexpected Developer Disk Image build ", strconv.Quote(build))
+}
+
+// A build with a trailing letter precedes the plain builds of its train
+// whatever its number: DDI 27B5028f has CoreDevice 651.19 and DDI 27B48 has
+// 651.31 (CoreDeviceUtilities current version, those DDI builds).
+func buildOlder(version, than [4]uint64) bool {
+	if order := slices.Compare(version[:2], than[:2]); order != 0 {
+		return order < 0
+	}
+	if (version[3] != 0) != (than[3] != 0) {
+		return version[3] != 0
+	}
+	return slices.Compare(version[2:], than[2:]) < 0
 }
 
 func (m *manifest) personalizedIdentity(board, chip uint64) (buildIdentity, error) {

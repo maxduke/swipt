@@ -107,6 +107,12 @@ const maxPacket = 65535
 
 const maxWrite = 256 << 10
 
+// The device leaves a TLS record of more than about 8192 bytes of data
+// unprocessed until a smaller record arrives: a 16 MB upload stalls on
+// 8300-byte records and completes on 8193-byte ones
+// (iPhone18,2, iOS 27.3 24C5037i, CoreDeviceProxy over USB).
+const maxRecord = 8192
+
 const retryDelay = time.Millisecond
 
 type Tunnel struct {
@@ -218,10 +224,14 @@ func (t *Tunnel) writePackets(packets []*buf.Buffer) {
 }
 
 func (t *Tunnel) write(data []byte) bool {
-	_, err := t.conn.Write(data)
-	if err != nil {
-		t.fail(E.Cause(err, "write to tunnel"))
-		return false
+	for len(data) > 0 {
+		record := data[:min(len(data), maxRecord)]
+		_, err := t.conn.Write(record)
+		if err != nil {
+			t.fail(E.Cause(err, "write to tunnel"))
+			return false
+		}
+		data = data[len(record):]
 	}
 	return true
 }

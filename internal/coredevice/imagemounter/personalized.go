@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/swipt-automation/swipt/internal/coredevice/rsd"
 	"github.com/swipt-automation/swipt/internal/coredevice/xpc"
@@ -83,6 +84,17 @@ func (c *Client) MountPersonalized(ctx context.Context, dir string) error {
 		}
 		c.logger.Info("mounted the personalized Developer Disk Image")
 		return conn.hangUp()
+	})
+}
+
+func (c *Client) Unmount(ctx context.Context) error {
+	return c.withMounter(ctx, func(conn *mounterConn) error {
+		const command = "UnmountImage"
+		reply, err := conn.request(map[string]any{"Command": command, "MountPath": developerMountPath})
+		if err != nil {
+			return err
+		}
+		return conn.expectStatus(command, reply, "Complete")
 	})
 }
 
@@ -206,6 +218,23 @@ func (m *mounterConn) imageMounted(imageType string) (bool, error) {
 		return false, E.New("imagemounter: LookupImage reply without ImageSignature")
 	}
 	return len(signatures) > 0, nil
+}
+
+// CopyDevices lists the DDI 17A324 mounted by MountImage and the DDI 27B52
+// installed by cryptexd at /System/Developer, each with its version.plist as
+// PersonalizedImageVersionInfo; LookupImage returns no ImageSignature for the
+// cryptex (iPhone18,2, iOS 27.3 24C5037i).
+func (m *mounterConn) developerImage() (map[string]any, error) {
+	reply, err := m.request(map[string]any{"Command": "CopyDevices"})
+	if err != nil {
+		return nil, err
+	}
+	entries, _ := reply["EntryList"].([]any)
+	image, _ := common.Find(entries, func(item any) bool {
+		entry, _ := item.(map[string]any)
+		return entry["MountPath"] == developerMountPath
+	}).(map[string]any)
+	return image, nil
 }
 
 func (m *mounterConn) personalizationIdentifiers() (map[string]any, error) {

@@ -14,7 +14,6 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/swipt-automation/swipt/internal/coredevice"
 	"github.com/swipt-automation/swipt/internal/coredevice/display"
-	"github.com/swipt-automation/swipt/internal/coredevice/imagemounter"
 	"github.com/swipt-automation/swipt/internal/rfb"
 	"github.com/swipt-automation/swipt/internal/version"
 )
@@ -144,8 +143,8 @@ type Connection struct {
 	retired   bool
 	sharing   *frontend
 
-	relisted bool
-	info     coredevice.DeviceInfo
+	images diskImages
+	info   coredevice.DeviceInfo
 }
 
 func New(options Options) *Connection {
@@ -163,6 +162,7 @@ func New(options Options) *Connection {
 		demand:      make(chan struct{}, 1),
 		displayWake: make(chan struct{}, 1),
 		deviceWake:  make(chan struct{}),
+		images:      diskImages{directory: options.DiskImageDirectory, logger: options.Logger},
 	}
 	s.name.Store(&options.Name)
 	s.settings.Store(&Settings{})
@@ -601,7 +601,7 @@ func (s *Connection) serveDevice(session context.Context, device *coredevice.Dev
 		return newError(ProblemUnsupported, "iOS ", info.OSVersion, " cannot share its screen; it needs iOS 17.4 or later")
 	}
 	s.setState(StatePreparing, nil)
-	err := s.prepareDiskImage(session, device, imagemounter.New(device, s.logger))
+	err := s.images.prepare(session, device)
 	if err != nil {
 		return lostOr(device, err)
 	}

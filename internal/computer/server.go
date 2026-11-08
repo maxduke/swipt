@@ -88,19 +88,13 @@ func Run(ctx context.Context, options Options) error {
 	}
 	defer listener.Close()
 
-	diskImage := options.DiskImage
-	if diskImage == "" {
-		if _, err := os.Stat(diskImages); err == nil {
-			diskImage = diskImages
-		}
-	}
 	deviceLogger := options.Logs.NewLogger("device")
 	connection := device.New(device.Options{
 		Name:               paired.Name,
 		Connect:            connect(paired.UDID, deviceLogger),
 		Logger:             deviceLogger,
 		Observer:           observer{},
-		DiskImageDirectory: diskImage,
+		DiskImageDirectory: diskImageDirectory(options.DiskImage),
 	})
 	if options.Passcode != "" {
 		if err = connection.UpdateSettings(device.Settings{AutoUnlockPasscode: options.Passcode, AutoUnlockPasscodeType: passcodeKind}); err != nil {
@@ -158,6 +152,31 @@ func Run(ctx context.Context, options Options) error {
 		options.Logs.NewLogger("api").Debug("stopped: ", err)
 	}
 	return nil
+}
+
+type MountOptions struct {
+	Device    string
+	DiskImage string
+	Logs      *log.Factory
+}
+
+func Mount(ctx context.Context, options MountOptions) error {
+	paired, err := chooseDevice(ctx, options.Device)
+	if err != nil {
+		return err
+	}
+	logger := options.Logs.NewLogger("device")
+	return device.PrepareDiskImage(ctx, connect(paired.UDID, logger), diskImageDirectory(options.DiskImage), logger)
+}
+
+func diskImageDirectory(given string) string {
+	if given != "" {
+		return given
+	}
+	if _, err := os.Stat(diskImages); err != nil {
+		return ""
+	}
+	return diskImages
 }
 
 func passcodeType(name string) (device.PasscodeType, error) {

@@ -21,9 +21,10 @@ import (
 const exitDeviceNotListed = 3
 
 var (
-	options     computer.Options
-	pairOptions computer.PairOptions
-	pairOutput  string
+	options      computer.Options
+	pairOptions  computer.PairOptions
+	pairOutput   string
+	mountOptions computer.MountOptions
 )
 
 func main() {
@@ -47,7 +48,16 @@ func main() {
 	}
 	pairCommand.Flags().StringVarP(&pairOptions.Device, "device", "d", "", "the device, by name or UDID")
 	pairCommand.Flags().StringVarP(&pairOutput, "output", "o", "", "write record to FILE (default: stdout)")
-	command.AddCommand(pairCommand, guestCommand())
+	mountCommand := &cobra.Command{
+		Use:          "mount [-d NAME|UDID] [--disk-image DIR]",
+		Short:        "Mount the Developer Disk Image, replacing an older one",
+		Args:         cobra.NoArgs,
+		RunE:         runMount,
+		SilenceUsage: true,
+	}
+	mountCommand.Flags().StringVarP(&mountOptions.Device, "device", "d", "", "the device, by name or UDID")
+	mountCommand.Flags().StringVar(&mountOptions.DiskImage, "disk-image", "", "the directory of the Developer Disk Image to mount (default: this Mac's)")
+	command.AddCommand(pairCommand, mountCommand, guestCommand())
 	if err := command.ExecuteContext(context.Background()); err != nil {
 		if errors.Is(err, context.Canceled) {
 			os.Exit(130)
@@ -110,6 +120,17 @@ func runPair(command *cobra.Command, _ []string) error {
 		return err
 	}
 	return os.WriteFile(pairOutput, record, 0o600)
+}
+
+func runMount(command *cobra.Command, _ []string) error {
+	mountOptions.Logs = log.NewFactory(log.Options{Level: log.LevelInfo, PlatformWriter: writer{}})
+	ctx, stop := signal.NotifyContext(command.Context(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	err := computer.Mount(ctx, mountOptions)
+	if err != nil && errors.Is(err, context.Canceled) && ctx.Err() != nil {
+		command.SilenceErrors = true
+	}
+	return err
 }
 
 func version() string {

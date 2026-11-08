@@ -43,7 +43,10 @@ final class SwipletStore {
         } catch {
             AppDirectory.logger.error("load repositories: \(error, privacy: .public)")
         }
-        repositories = [stored.first(where: \.isOfficial) ?? .official] + stored.filter { !$0.isOfficial }
+        for repository in stored where repository.isOfficial && repository.url != Repository.official.url {
+            removeRepository(repository.url)
+        }
+        repositories = [stored.first { $0.url == Repository.official.url } ?? .official] + stored.filter { !$0.isOfficial }
     }
 
     func reload() {
@@ -195,7 +198,9 @@ final class SwipletStore {
     @available(iOS 17.4, *)
     func addRepository(_ link: String) async throws {
         let link = link.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !repositories.contains(where: { $0.url == link }) else { throw MessageError(String(localized: "The repository is already added.")) }
+        guard !repositories.contains(where: { $0.url == link }), !Repository.isOfficial(link) else {
+            throw MessageError(String(localized: "The repository is already added."))
+        }
         let fetched = try await Self.fetch(link, etag: "", source: true)
         let index = try JSONDecoder().decode(SourceIndex.self, from: fetched.data)
         let image = await Self.image(index.image, relativeTo: link)
@@ -512,8 +517,11 @@ nonisolated struct IOSOutdatedError: LocalizedError {
 }
 
 nonisolated struct Repository: Identifiable, Sendable {
+    private static let stableURL = "https://github.com/swipt-automation/official-swiplets/releases/latest/download/swiplets.json"
+    private static let nightlyURL = "https://github.com/swipt-automation/official-swiplets/releases/download/nightly/swiplets.json"
+
     static let official = Repository(
-        url: "https://github.com/swipt-automation/official-swiplets/releases/download/nightly/swiplets.json",
+        url: Bundle.main.object(forInfoDictionaryKey: "SwiptChannel") as? String == "stable" ? stableURL : nightlyURL,
         name: String(localized: "Official Swiplets"), localizedNames: nil, icon: RepositorySwiplet.Icon(color: nil, symbol: "checkmark.seal.fill"),
         image: nil, etag: "", swiplets: [])
 
@@ -527,7 +535,11 @@ nonisolated struct Repository: Identifiable, Sendable {
 
     var id: String { url }
 
-    var isOfficial: Bool { url == Self.official.url }
+    var isOfficial: Bool { Self.isOfficial(url) }
+
+    static func isOfficial(_ url: String) -> Bool {
+        url == stableURL || url == nightlyURL
+    }
 
     var title: String {
         SwipletStore.preferredName(name, localized: localizedNames ?? [:])

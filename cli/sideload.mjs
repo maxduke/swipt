@@ -892,6 +892,57 @@ async function localIPA(context) {
     : path.join(downloads, cached);
 }
 
+async function withLocalApp(context, device, run) {
+  if (device.virtual) {
+    return run(undefined);
+  }
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "swipt-app-"));
+  try {
+    return await run(await unpack(await localIPA(context), work));
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
+async function mountDiskImage(context, device, app) {
+  if (device.virtual) {
+    return;
+  }
+  try {
+    await step(
+      tr("preparing the Developer Disk Image on {device}", {
+        device: device.name,
+      }),
+      async () => {
+        try {
+          await exec(serverPath(), [
+            "mount",
+            "-d",
+            device.udid,
+            "--disk-image",
+            path.join(app, "DeveloperDiskImage"),
+          ]);
+        } catch (error) {
+          if (error.code !== "ENOENT") {
+            throw error;
+          }
+        }
+      },
+      { transient: true },
+    );
+  } catch (error) {
+    if (context.signal.aborted) {
+      throw error;
+    }
+    console.error(
+      tr("could not prepare the Developer Disk Image on {device}: {error}", {
+        device: device.name,
+        error: /^Error: (.*)$/m.exec(error.stderr ?? "")?.[1] ?? error.message,
+      }),
+    );
+  }
+}
+
 async function deploy(context, { device, team, current }, updateOnly) {
   const passcode = await installPasscode(context, device, current);
   const release = await step(
@@ -932,22 +983,33 @@ async function deploy(context, { device, team, current }, updateOnly) {
         );
       }
       const saves = !updateOnly && passcode !== undefined;
-      if (saves) {
-        await step(tr("setting up auto-unlock"), () =>
-          setUpAutoUnlock(device, id, passcode),
-        );
-      }
-      if (context.options["no-setup"]) {
-        if (saves) {
-          await launch(device, id);
-        }
+      const pairs =
+        !context.options["no-setup"] &&
+        !context.options["no-setup-pair"] &&
+        !(await step(
+          tr("checking Swipt on {device}", { device: device.name }),
+          () => containerHasFile(device, id, pairingPath),
+          { transient: true },
+        ));
+      if (!saves && !pairs) {
         return;
       }
-      const paired =
-        !context.options["no-setup-pair"] && (await pair(device, id));
-      if (saves || paired) {
-        await openConfigured(context, device, id, passcode);
-      }
+      await withLocalApp(context, device, async (app) => {
+        await mountDiskImage(context, device, app);
+        if (saves) {
+          await step(tr("setting up auto-unlock"), () =>
+            setUpAutoUnlock(device, id, passcode),
+          );
+        }
+        if (context.options["no-setup"]) {
+          await launch(device, id);
+          return;
+        }
+        const paired = pairs && (await pair(device, id, true));
+        if (saves || paired) {
+          await openConfigured(context, device, id, passcode, undefined, app);
+        }
+      });
       return;
     }
     if (installed > release.build && updateOnly) {
@@ -1040,6 +1102,7 @@ export async function installAndOpen(
       );
     }
   }
+  await mountDiskImage(context, device, app);
   if (device.virtual) {
     await installOnGuest(device, id, app);
   } else {
@@ -1145,7 +1208,6 @@ async function openConfigured(context, device, id, passcode, updated, app) {
       },
     );
   } else {
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), "swipt-disk-image-"));
     try {
       await trustAndOpen(
         context,
@@ -1153,10 +1215,7 @@ async function openConfigured(context, device, id, passcode, updated, app) {
         id,
         passcode,
         updated,
-        path.join(
-          app ?? (await unpack(await localIPA(context), work)),
-          "DeveloperDiskImage",
-        ),
+        path.join(app, "DeveloperDiskImage"),
       );
     } catch (error) {
       if (error.message !== serverHint) {
@@ -1170,8 +1229,6 @@ async function openConfigured(context, device, id, passcode, updated, app) {
       if (!(await launch(device, id, publishes ? [publishArgument] : []))) {
         return;
       }
-    } finally {
-      fs.rmSync(work, { recursive: true, force: true });
     }
   }
   if (publishes) {
@@ -1240,15 +1297,18 @@ export async function setup(context) {
     (interactive(context) && !device.virtual
       ? await askPasscode(context)
       : undefined);
-  if (passcode !== undefined) {
-    await step(tr("setting up auto-unlock"), () =>
-      setUpAutoUnlock(device, id, passcode),
-    );
-  }
-  if (!context.options["no-setup-pair"]) {
-    await pair(device, id, true);
-  }
-  await openConfigured(context, device, id, passcode);
+  await withLocalApp(context, device, async (app) => {
+    await mountDiskImage(context, device, app);
+    if (passcode !== undefined) {
+      await step(tr("setting up auto-unlock"), () =>
+        setUpAutoUnlock(device, id, passcode),
+      );
+    }
+    if (!context.options["no-setup-pair"]) {
+      await pair(device, id, true);
+    }
+    await openConfigured(context, device, id, passcode, undefined, app);
+  });
 }
 
 const trustMessages = JSON.stringify({
