@@ -33,6 +33,13 @@ type RemotePairingOptions struct {
 	Address netip.AddrPort
 	Record  *pairing.Record
 	Logger  logger.ContextLogger
+	OnStage func(string, uint16)
+}
+
+func (o RemotePairingOptions) stage(name string, port uint16) {
+	if o.OnStage != nil {
+		o.OnStage(name, port)
+	}
 }
 
 var ErrLoopbackAddress = E.New("remote pairing through a loopback address is refused: " +
@@ -47,35 +54,42 @@ func ConnectRemotePairing(ctx context.Context, options RemotePairingOptions) (*D
 		options.Logger = logger.NOP()
 	}
 	var dialer net.Dialer
+	options.stage("remote_pairing_tcp", options.Address.Port())
 	conn, err := dialer.DialContext(ctx, "tcp", options.Address.String())
 	if err != nil {
 		return nil, E.Cause(err, "connect to remote pairing")
 	}
+	options.stage("pair_verify", options.Address.Port())
 	session, err := pairing.Verify(ctx, conn, options.Record, options.Logger)
 	if err != nil {
 		return nil, err
 	}
+	options.stage("create_tunnel_listener", options.Address.Port())
 	port, err := session.CreateListener(ctx)
 	if err != nil {
 		session.Close()
 		return nil, err
 	}
 	options.Logger.Debug("remote pairing listener: ", port)
+	options.stage("tunnel_tcp", port)
 	tunnelConn, err := dialer.DialContext(ctx, "tcp", netip.AddrPortFrom(options.Address.Addr(), port).String())
 	if err != nil {
 		session.Close()
 		return nil, E.Cause(err, "connect to tunnel port")
 	}
+	options.stage("tunnel_tls", port)
 	secureConn, err := tlspsk.Client(ctx, tunnelConn, session.Key())
 	if err != nil {
 		session.Close()
 		return nil, E.Cause(err, "tunnel TLS")
 	}
+	options.stage("cdtunnel_handshake", port)
 	tun, err := tunnel.Open(ctx, secureConn, tunnelMTU(options.Record.DeviceUDID), options.Logger)
 	if err != nil {
 		session.Close()
 		return nil, err
 	}
+	options.stage("remote_service_discovery", tun.Parameters().ServerRSDPort)
 	return newDevice(ctx, tun, session, handshakeIdentity(options.Record.Identifier), options.Logger)
 }
 

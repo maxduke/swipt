@@ -26,6 +26,11 @@ struct SettingsView: View {
                     } label: {
                         Label("Automatic Unlock", systemImage: "lock.open")
                     }
+                    NavigationLink {
+                        ConnectionDiagnosticsView()
+                    } label: {
+                        Label("Connection Diagnostics", systemImage: "network")
+                    }
                 }
                 #endif
             }

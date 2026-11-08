@@ -24,6 +24,7 @@ final class DeviceConnection {
     }
 
     private(set) var phase: Phase = .idle
+    private(set) var connectionErrorCode: Int32 = 0
     private(set) var tunnelFound: Bool?
     private(set) var tunnelThroughLocalNetwork = false
     private(set) var usesCellular = false
@@ -155,6 +156,25 @@ final class DeviceConnection {
         probeTask = nil
     }
 
+    var connectionDiagnostics: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let vpnStatus = tunnelFound.map { $0 ? "reachable" : "unreachable" } ?? "unknown"
+        return """
+        Swipt \(version) (\(build))
+        OS: \(ProcessInfo.processInfo.operatingSystemVersionString)
+        Policy: documented peer first; original one-second stage deadlines
+        Foreground VPN result: \(vpnStatus)
+        Current Bonjour remote-pairing port: \(remotePairing.port ?? 49152) (\(remotePairing.port == nil ? "fallback" : "discovered"))
+        Native connection phase: \(phase); error code: \(connectionErrorCode)
+        Pairing record present: \(pairing.isPaired)
+        TCP connectivity alone does not establish pairing or a developer tunnel.
+
+        Latest actual native connection attempt:
+        \(device.connectionDiagnostics())
+        """
+    }
+
     private func observePairing() {
         let record = withPerceptionTracking {
             pairing.record
@@ -206,6 +226,7 @@ final class DeviceConnection {
     }
 
     private func handle(_ change: DeviceStateChange) {
+        connectionErrorCode = change.errorCode
         switch change.state {
         case LibSwiptDeviceConnecting:
             phase = .connecting

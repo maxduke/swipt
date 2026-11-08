@@ -87,6 +87,7 @@ struct LoopbackSetupView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var hasLocalDevVPN = false
     @State private var hasSingBox = false
+    @State private var showsDiagnostics = false
 
     private let device = Platform.shared.device
 
@@ -122,6 +123,10 @@ struct LoopbackSetupView: View {
                 .padding(.top, 8)
             }
         } actions: {
+            Button("Connection Diagnostics") { showsDiagnostics = true }
+        }
+        .sheet(isPresented: $showsDiagnostics) {
+            NavigationStackCompat { ConnectionDiagnosticsView(isSheet: true) }
         }
         .onChangeCompat(of: scenePhase == .active, initial: true) { active in
             guard active else { return }

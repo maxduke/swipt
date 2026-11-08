@@ -101,6 +101,7 @@ type Device struct {
 	pairing     atomic.Pointer[pairingFile]
 	loopback    atomic.Pointer[LoopbackAddress]
 	unavailable atomic.Bool
+	trace       atomic.Pointer[connectionTrace]
 }
 
 func newDevice(options *DeviceOptions, handler DeviceHandler, logFactory *log.Factory) *Device {
@@ -116,30 +117,42 @@ func newDevice(options *DeviceOptions, handler DeviceHandler, logFactory *log.Fa
 			}
 			port := uint16(d.pairingPort.Load())
 			var udid string
+			service := "remote_pairing"
 			if file.lockdown != nil {
 				port = lockdown.Port
 				udid = file.lockdown.UDID
+				service = "lockdown"
 			} else {
 				udid = file.remote.DeviceUDID
 			}
 			allowLocal := coredevice.IsGuest(udid)
 			var localError error
 			for {
+				trace := newConnectionTrace(port, service)
+				d.trace.Store(trace)
 				peer, err := vpnpeer.Find(ctx, port, allowLocal)
+				if err != nil {
+					trace.finish("probe_failed", int32(device.ProblemOf(err)), err)
+				}
 				var connected *coredevice.Device
 				if err == nil {
+					trace.selectPeer(peer.Address, peer.LocalNetwork)
 					connectLogger.Info("device address: ", peer.Address, ", local network: ", peer.LocalNetwork)
 					if file.lockdown != nil {
+						trace.advance("lockdown_pairing_and_tunnel", port)
 						connected, err = coredevice.ConnectLockdown(ctx, coredevice.LockdownOptions{Address: peer.Address, Record: file.lockdown, Logger: connectLogger})
 					} else {
 						connected, err = coredevice.ConnectRemotePairing(ctx, coredevice.RemotePairingOptions{
 							Address: netip.AddrPortFrom(peer.Address, port), Record: file.remote, Logger: connectLogger,
+							OnStage: trace.advance,
 						})
 					}
 					if err == nil {
+						trace.finish("paired_tunnel_connected", 0, nil)
 						d.loopback.Store(newLoopbackAddress(peer))
 						return connected, nil
 					}
+					trace.finish("pairing_or_tunnel_failed", int32(device.ProblemOf(err)), err)
 				}
 				if !allowLocal || ctx.Err() != nil {
 					return nil, E.Errors(localError, err)
@@ -198,6 +211,13 @@ func (d *Device) UpdateSettings(settings *DeviceSettings) error {
 
 func (d *Device) LoopbackAddress() *LoopbackAddress {
 	return d.loopback.Load()
+}
+
+func (d *Device) ConnectionDiagnostics() string {
+	if trace := d.trace.Load(); trace != nil {
+		return trace.json()
+	}
+	return "No native connection attempt recorded. Run the failing device operation, then refresh."
 }
 
 func (d *Device) SetRemotePairingPort(port int32) {
