@@ -1,0 +1,63 @@
+name: Unsigned iOS IPA
+
+on:
+  push:
+    branches:
+      - feature/qx-loopback-ipa
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_ios_ipa:
+    name: Build unsigned iOS IPA
+    runs-on: xcode-27
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          submodules: true
+      - name: Select Xcode
+        run: .github/select_xcode.sh
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build Apple library
+        run: go run ./internal/cmd/build_libswipt -target ios/arm64
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Set up React Native
+        run: bun dev frameworks
+      - name: Build IPA and icon
+        run: make archive_ios_ipa altstore_icon
+        env:
+          XCODEBUILD_FLAGS: CURRENT_PROJECT_VERSION=${{ github.run_number }}
+      - name: Package dSYMs
+        run: ditto -c -k --keepParent build/Swipt-iOS.xcarchive/dSYMs build/Swipt-iOS.dSYMs.zip
+      - name: Write metadata
+        run: |
+          INFO_PLIST=build/Swipt-iOS.xcarchive/Products/Applications/Swipt.app/Info.plist
+          VERSION=$(plutil -extract CFBundleShortVersionString raw "$INFO_PLIST")
+          BUILD=$(plutil -extract CFBundleVersion raw "$INFO_PLIST")
+          printf '{"version":"%s","build":%s,"commit":"%s"}\n' "$VERSION" "$BUILD" "$GITHUB_SHA" > build/metadata.json
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Swipt-QX-loopback-unsigned-IPA
+          path: |
+            build/Swipt.ipa
+            build/Swipt-iOS.dSYMs.zip
+            build/metadata.json
+            build/altstore
+          if-no-files-found: error
