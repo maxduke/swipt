@@ -12,7 +12,7 @@ permissions:
 jobs:
   build_ios_ipa:
     name: Build unsigned iOS IPA
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -20,6 +20,12 @@ jobs:
           submodules: true
       - name: Select Xcode
         run: .github/select_xcode.sh
+      - name: Verify Xcode and iOS SDK
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          XCODE_MAJOR=$(xcodebuild -version | awk '/^Xcode / { split($2, version, "."); print version[1] }')
+          test "$XCODE_MAJOR" -ge 27
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
