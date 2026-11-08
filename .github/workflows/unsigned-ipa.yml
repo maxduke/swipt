@@ -12,7 +12,7 @@ permissions:
 jobs:
   build_ios_ipa:
     name: Build unsigned iOS IPA
-    runs-on: xcode-27
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
