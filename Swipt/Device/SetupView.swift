@@ -87,77 +87,78 @@ struct LoopbackSetupView: View {
     @State private var usesCellular = false
     @State private var pathMonitor: NWPathMonitor?
     @State private var showsDiagnostics = false
+    @State private var hasAdvanced = false
 
     private let device = Platform.shared.device
 
     var body: some View {
-        SetupPage(
-            usesCellular ? "antenna.radiowaves.left.and.right.slash" : "network",
-            usesCellular ? Text("Unsupported Network") : Text("Loopback VPN"),
-            description: usesCellular
-                ? Text("Swipt only stops working on cellular data, due to Apple’s restrictions on developer services.")
-                : Text("Swipt needs a loopback VPN to connect to developer services. LocalDevVPN or sing-box is recommended.")
-        ) {
-            WithPerceptionTracking {
+        WithPerceptionTracking {
+            SetupPage(
+                usesCellular ? "antenna.radiowaves.left.and.right.slash" : "network",
+                usesCellular ? Text("Unsupported Network") : Text("Loopback VPN"),
+                description: usesCellular
+                    ? Text("Swipt only stops working on cellular data, due to Apple’s restrictions on developer services.")
+                    : Text("Swipt needs a loopback VPN to connect to developer services. LocalDevVPN or sing-box is recommended.")
+            ) {
                 Text(device.probeMessage)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-            }
-            if !usesCellular {
-                VStack(spacing: 24) {
-                    Divider()
-                    VStack(spacing: 12) {
-                        if hasLocalDevVPN {
-                            SetupPrimaryButton(title: Text("Open LocalDevVPN")) { UIApplication.shared.open(Self.localDevVPN) }
-                        } else {
-                            SetupPrimaryButton(title: Text("Get LocalDevVPN")) { UIApplication.shared.open(Self.localDevVPNStore) }
+                if !usesCellular {
+                    VStack(spacing: 24) {
+                        Divider()
+                        VStack(spacing: 12) {
+                            if hasLocalDevVPN {
+                                SetupPrimaryButton(title: Text("Open LocalDevVPN")) { UIApplication.shared.open(Self.localDevVPN) }
+                            } else {
+                                SetupPrimaryButton(title: Text("Get LocalDevVPN")) { UIApplication.shared.open(Self.localDevVPNStore) }
+                            }
+                        }
+                        Divider()
+                        VStack(spacing: 12) {
+                            if hasSingBox {
+                                SetupPrimaryButton(title: Text("Open sing-box")) { UIApplication.shared.open(Self.singBox) }
+                                SetupSecondaryButton(title: Text("Import example profile into sing-box"), action: shareProfile)
+                            } else {
+                                SetupPrimaryButton(title: Text("Get sing-box")) { UIApplication.shared.open(Self.singBoxStore) }
+                            }
                         }
                     }
-                    Divider()
-                    VStack(spacing: 12) {
-                        if hasSingBox {
-                            SetupPrimaryButton(title: Text("Open sing-box")) { UIApplication.shared.open(Self.singBox) }
-                            SetupSecondaryButton(title: Text("Import example profile into sing-box"), action: shareProfile)
-                        } else {
-                            SetupPrimaryButton(title: Text("Get sing-box")) { UIApplication.shared.open(Self.singBoxStore) }
-                        }
-                    }
+                    .frame(maxWidth: 480)
+                    .padding(.top, 8)
                 }
-                .frame(maxWidth: 480)
-                .padding(.top, 8)
+            } actions: {
+                HStack {
+                    Button("Retry") { device.retryProbing() }
+                    Spacer()
+                    Button("Diagnostics") { showsDiagnostics = true }
+                }
             }
-        } actions: {
-            HStack {
-                Button("Retry") { device.retryProbing() }
-                Spacer()
-                Button("Diagnostics") { showsDiagnostics = true }
+            .sheet(isPresented: $showsDiagnostics) {
+                LoopbackDiagnosticsView()
             }
-        }
-        .sheet(isPresented: $showsDiagnostics) {
-            LoopbackDiagnosticsView()
-        }
-        .onChangeCompat(of: scenePhase == .active, initial: true) { active in
-            guard active else { return }
-            hasLocalDevVPN = UIApplication.shared.canOpenURL(Self.localDevVPN)
-            hasSingBox = UIApplication.shared.canOpenURL(Self.singBox)
-        }
-        .onChangeCompat(of: device.tunnelFound == true) { found in
-            if found {
+            .onChangeCompat(of: scenePhase == .active, initial: true) { active in
+                guard active else { return }
+                hasLocalDevVPN = UIApplication.shared.canOpenURL(Self.localDevVPN)
+                hasSingBox = UIApplication.shared.canOpenURL(Self.singBox)
+            }
+            .onChangeCompat(of: device.tunnelFound == true, initial: true) { found in
+                guard found, !hasAdvanced else { return }
+                hasAdvanced = true
                 next()
             }
-        }
-        .onAppear {
-            let monitor = NWPathMonitor()
-            monitor.pathUpdateHandler = { path in
-                let cellular = path.usesInterfaceType(.cellular)
-                Task { @MainActor in usesCellular = cellular }
+            .onAppear {
+                let monitor = NWPathMonitor()
+                monitor.pathUpdateHandler = { path in
+                    let cellular = path.usesInterfaceType(.cellular)
+                    Task { @MainActor in usesCellular = cellular }
+                }
+                monitor.start(queue: .main)
+                pathMonitor = monitor
             }
-            monitor.start(queue: .main)
-            pathMonitor = monitor
-        }
-        .onDisappear {
-            pathMonitor?.cancel()
-            pathMonitor = nil
+            .onDisappear {
+                pathMonitor?.cancel()
+                pathMonitor = nil
+            }
         }
     }
 

@@ -44,6 +44,31 @@ has not been inspected. Its configuration need not change.
   while specific pairing rejection and developer-mode errors retain their
   existing classifications. Pairing verification and TLS are unchanged.
 
+## Follow-up device evidence and setup navigation
+
+The first QX device report from this build reached `10.7.0.1:49152` in 3 ms,
+selected that address, and did not attempt any inferred routes. The explicit
+peer was not listed on a local interface in that attempt. This establishes TCP
+reachability inside Swipt on that run; it does not establish the cause of the
+original unmodified build's failure or authenticate the paired tunnel.
+
+The user then reported that the VPN screen remained visible until leaving and
+re-entering Swipt, after which it worked. `LoopbackSetupView` observed its status
+text inside `WithPerceptionTracking`, but evaluated the navigation condition
+outside that scope and only handled subsequent changes. Perception's
+[pinned documentation](https://github.com/pointfreeco/swift-perception/blob/597afd46249f4a71885b95d26b26cc5b893daf32/README.md)
+requires perceptible state reads to be tracked. The entire page now tracks the
+success condition and handles an already-successful result on appearance.
+Advancement is guarded to happen once. Diagnostics also expose the current VPN
+setup result and the pairing/Automatic Unlock setup flags, without their contents.
+
+The native connection is acquired by device operations (and the startup
+accessibility task when enabled). An idle phase with no native probe can reflect
+no active demand or an unmet availability condition; it is not itself a pairing
+failure. Next acceptance: launch with QX active and verify that a successful probe
+advances without another app restart, then perform a device operation. Repeat
+with LocalDevVPN. The navigation repair still requires physical-device acceptance.
+
 ## Changed behavior
 
 1. Test the documented `10.7.0.1` peer explicitly, even if listed on an interface.

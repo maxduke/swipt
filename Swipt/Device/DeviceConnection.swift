@@ -181,10 +181,13 @@ final class DeviceConnection {
     var diagnostics: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let vpnStatus = tunnelFound.map { $0 ? "reachable" : "unreachable" } ?? "unknown"
         return """
         Swipt \(version) (\(build))
         OS: \(ProcessInfo.processInfo.operatingSystemVersionString)
         Foreground probing requested: \(probeClients > 0); probe in progress: \(probeInProgress)
+        VPN setup result: \(vpnStatus)
+        Pairing record present: \(pairing.isPaired); Automatic Unlock decided: \(autoUnlock.isDecided)
         Connection phase: \(phase); error code: \(connectionErrorCode)
         TCP reachability does not verify the VPN peer's identity or establish a paired tunnel.
 
