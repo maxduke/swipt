@@ -66,6 +66,33 @@ type Peer struct {
 
 func Find(ctx context.Context, port uint16, allowLocal bool) (Peer, error) {
 	addresses, scanErr := candidates(allowLocal)
+	var dialer net.Dialer
+	return find(ctx, port, addresses, scanErr, dialer.DialContext)
+}
+
+type dialContext func(context.Context, string, string) (net.Conn, error)
+
+func find(ctx context.Context, port uint16, addresses []netip.Addr, scanErr error, dial dialContext) (Peer, error) {
+	// Route-derived addresses are heuristics: the first TCP connection need not
+	// reach the reflected peer. Try the documented peer before racing alternatives.
+	if index := slices.Index(addresses, fixedAddress); index >= 0 {
+		peer, err := probe(ctx, port, []netip.Addr{fixedAddress}, nil, dial)
+		if err == nil {
+			return peer, nil
+		}
+		if ctx.Err() != nil {
+			return Peer{}, ctx.Err()
+		}
+		if len(addresses) == 1 {
+			return Peer{}, E.Errors(err, scanErr)
+		}
+		scanErr = E.Errors(scanErr, err)
+		addresses = slices.Delete(slices.Clone(addresses), index, index+1)
+	}
+	return probe(ctx, port, addresses, scanErr, dial)
+}
+
+func probe(ctx context.Context, port uint16, addresses []netip.Addr, scanErr error, dial dialContext) (Peer, error) {
 	if len(addresses) == 0 {
 		return Peer{}, E.Errors(E.New("vpnpeer: no VPN address to try"), scanErr)
 	}
@@ -79,8 +106,7 @@ func Find(ctx context.Context, port uint16, allowLocal bool) (Peer, error) {
 	results := make(chan result, len(addresses))
 	for index, address := range addresses {
 		go func() {
-			var dialer net.Dialer
-			conn, err := dialer.DialContext(ctx, "tcp", netip.AddrPortFrom(address, port).String())
+			conn, err := dial(ctx, "tcp", netip.AddrPortFrom(address, port).String())
 			var local netip.Addr
 			if err == nil {
 				local = M.AddrPortFromNet(conn.LocalAddr()).Addr().Unmap()

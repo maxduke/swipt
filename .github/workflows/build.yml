@@ -297,7 +297,7 @@ jobs:
           if-no-files-found: error
   publish_packages:
     name: Publish packages
-    if: github.ref == 'refs/heads/main' && needs.calculate_version.outputs.packages_changed == 'true'
+    if: github.repository == 'swipt-automation/swipt' && github.ref == 'refs/heads/main' && needs.calculate_version.outputs.packages_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -514,6 +514,7 @@ jobs:
           if-no-files-found: error
   publish_release:
     name: Publish release
+    if: github.repository == 'swipt-automation/swipt'
     runs-on: ubuntu-latest
     permissions:
       contents: read
